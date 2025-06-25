@@ -172,10 +172,13 @@ int main() {
    double ds_values[2];
    for (i = 0; i < 2; i++){
      ds_values[i] = wb_distance_sensor_get_value(ds[i]);
-     printf("Sensor %d: %.2f\n", i, ds_values[i]);
+     if (ds_values[i] < 950.0){
+       ds_detect_near=true;
+       printf("Sensor de distancia %d detectó un obstáculo\n", i);
+       break;
+     }
    }
-  if (ds_values[i] < 950.0)
-     ds_detect_near=true;
+
         
   
     
@@ -215,12 +218,21 @@ int main() {
     
       }
       
-      //plan path
-     //Planificación (solo una vez o cada cierto tiempo)
-      Point start = {GRID_SIZE / 2, GRID_SIZE / 2};
+      // --- Planificación de Ruta ---
+     // 1. Convertir la posición GPS del robot a coordenadas de la grilla
+      int start_cell_x = (int)((robot_x + GRID_SIZE * CELL_SIZE / 2) / CELL_SIZE);
+      int start_cell_y = (int)((robot_y + GRID_SIZE * CELL_SIZE / 2) / CELL_SIZE);
+      
+      Point start = {start_cell_x, start_cell_y};
       Point goal = {GRID_SIZE - 2, GRID_SIZE - 2};
-      path_length = plan_path(grid, start, goal, path, 100);
-        
+      
+      // 2. Llamar a A* solo si estamos dentro de los límites del mapa
+      if (start_cell_x >= 0 && start_cell_x < GRID_SIZE && start_cell_y >= 0 && start_cell_y < GRID_SIZE) {
+          path_length = plan_path(grid, start, goal, path, 100);
+      } else {
+          path_length = 0; // No hay ruta si estamos fuera del mapa
+      }
+              
      if(lidar_detect_near || ds_detect_near){
        left_speed=1.0;
        right_speed=-1.0;
