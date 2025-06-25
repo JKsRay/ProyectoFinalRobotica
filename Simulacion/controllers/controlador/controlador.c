@@ -6,6 +6,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <webots/compass.h>
 
 #define TIME_STEP 64
 #define GRID_SIZE 8  
@@ -153,17 +154,30 @@ int main() {
   //GPS
   WbDeviceTag gps = wb_robot_get_device("gps");
   wb_gps_enable(gps, TIME_STEP);
+  
+  // Compass
+  WbDeviceTag compass = wb_robot_get_device("compass");
+  wb_compass_enable(compass, TIME_STEP);
 
   //ruta grilla
   int grid[GRID_SIZE][GRID_SIZE] = {0};
   Point path[100];
   int path_length = 0;
+  int replan_counter = 0;
   
   while (wb_robot_step(TIME_STEP) != -1) {
    
    //Flags
    bool ds_detect_near=false;
    bool lidar_detect_near=false;
+   
+   // Limpiamos el mapa en cada paso para basar las decisiones solo en la percepción actual.
+   // Esto evita la acumulación de errores y resuelve el problema de que el robot se detenga.
+   for (int x = 0; x < GRID_SIZE; x++) {
+        for (int y = 0; y < GRID_SIZE; y++) {
+            grid[x][y] = 0;
+        }
+    }
    
    left_speed = 1.0;
    right_speed = 1.0;
@@ -213,39 +227,103 @@ int main() {
           grid[cell_x][cell_y] = 1;  // Marcado como ocupado
       }
       
-      if(dist < 0.3)
+      if(dist < 0.15)
         lidar_detect_near=true; //obstaculo muy cerca girar
     
       }
       
-      // --- Planificación de Ruta ---
-     // 1. Convertir la posición GPS del robot a coordenadas de la grilla
-      int start_cell_x = (int)((robot_x + GRID_SIZE * CELL_SIZE / 2) / CELL_SIZE);
-      int start_cell_y = (int)((robot_y + GRID_SIZE * CELL_SIZE / 2) / CELL_SIZE);
+      replan_counter++;
       
-      Point start = {start_cell_x, start_cell_y};
-      Point goal = {GRID_SIZE - 2, GRID_SIZE - 2};
-      
-      // 2. Llamar a A* solo si estamos dentro de los límites del mapa
-      if (start_cell_x >= 0 && start_cell_x < GRID_SIZE && start_cell_y >= 0 && start_cell_y < GRID_SIZE) {
-          path_length = plan_path(grid, start, goal, path, 100);
-      } else {
-          path_length = 0; // No hay ruta si estamos fuera del mapa
+      // Condición para replanificar solo cada cierto número de pasos
+     if (replan_counter % 50 == 0) {
+  
+        // --- Planificación de Ruta ---  
+        // 1. Convertir la posición GPS del robot a coordenadas de la grilla
+        int start_cell_x = (int)((robot_x + GRID_SIZE * CELL_SIZE / 2) / CELL_SIZE);
+        int start_cell_y = (int)((robot_y + GRID_SIZE * CELL_SIZE / 2) / CELL_SIZE);
+        
+        Point start = {start_cell_x, start_cell_y};
+        Point goal = {GRID_SIZE - 2, GRID_SIZE - 2};
+        
+        //Forzamos que la celda de inicio y la de fin estén siempre libres
+        grid[start.x][start.y] = 0;
+        grid[goal.x][goal.y] = 0;
+        
+        // 2. Llamar a A* solo si estamos dentro de los límites del mapa
+        if (start_cell_x >= 0 && start_cell_x < GRID_SIZE && start_cell_y >= 0 && start_cell_y < GRID_SIZE) {
+            path_length = plan_path(grid, start, goal, path, 100);
+        } else {
+            path_length = 0; // No hay ruta si estamos fuera del mapa
+        }
+        
       }
               
-     if(lidar_detect_near || ds_detect_near){
-       left_speed=1.0;
-       right_speed=-1.0;
-     } else if(path_length > 1) {
-       left_speed=SPEED;
-       right_speed=SPEED;
-      }
-    
+     // --- LÓGICA DE CONTROL DE MOVIMIENTO ---
+
+      if (lidar_detect_near || ds_detect_near) {
+          // MÁXIMA PRIORIDAD: Evasión reactiva de obstáculos
+          left_speed = -1.0;
+          right_speed = 1.0 ;
+      } else if (path_length > 1) {
+          // SEGUNDA PRIORIDAD: Seguir la ruta planificada
       
-    wb_motor_set_velocity(wheels[0], left_speed);
-    wb_motor_set_velocity(wheels[1], right_speed);
-    wb_motor_set_velocity(wheels[2], left_speed);
-    wb_motor_set_velocity(wheels[3], right_speed);
+          // 1. Obtener el siguiente punto (waypoint) de la ruta.
+          // El path[0] es donde estamos, path[1] es el siguiente.
+          int lookahead_index = 3; // experimentar con este valor, 2, 3 o 4 son buenas opciones.
+          if (path_length <= lookahead_index) {
+              lookahead_index = path_length - 1; // Si la ruta es corta, apunta al final.
+          }
+          Point next_waypoint = path[lookahead_index];
+                
+          // Convertir las coordenadas de la grilla del waypoint a coordenadas del mundo
+          double waypoint_x = (next_waypoint.x - GRID_SIZE / 2.0) * CELL_SIZE;
+          double waypoint_y = (next_waypoint.y - GRID_SIZE / 2.0) * CELL_SIZE;
+      
+          // 2. Calcular el ángulo hacia el waypoint
+          double angle_to_goal = atan2(waypoint_y - robot_y, waypoint_x - robot_x);
+      
+          // 3. Obtener la orientación actual del robot desde la brújula
+          const double *compass_vals = wb_compass_get_values(compass);
+          // El norte en Webots está en el eje X, se utiliza atan2(norte, este)
+          double robot_bearing = atan2(compass_vals[2], compass_vals[0]);
+      
+          // 4. Calcular la diferencia de ángulo que necesitamos corregir
+          double angle_diff = angle_to_goal - robot_bearing;
+      
+          // Normalizar el ángulo a un rango de -PI a PI
+          while (angle_diff > M_PI) angle_diff -= 2 * M_PI;
+          while (angle_diff < -M_PI) angle_diff += 2 * M_PI;
+      
+          // 5. Decidir si girar o avanzar
+          double tolerance = 0.1; // 0.1 radianes (aprox 5.7 grados)
+          if (fabs(angle_diff) > tolerance) {
+            // Si no estamos orientados, GIRAR.
+            left_speed = angle_diff * 4.0; // Aumentamos un poco la reactividad del giro
+            right_speed = -angle_diff * 4.0;
+        
+            // Limitar la velocidad para que no exceda la velocidad máxima.
+            if (left_speed > SPEED) left_speed = SPEED;
+            if (left_speed < -SPEED) left_speed = -SPEED;
+            if (right_speed > SPEED) right_speed = SPEED;
+            if (right_speed < -SPEED) right_speed = -SPEED;
+
+          } else {
+              // Si ya estamos orientados, AVANZAR.
+              left_speed = SPEED;
+              right_speed = SPEED;
+          }
+                
+      } else {
+          // TERCERA PRIORIDAD: No hay obstáculos y no hay ruta, nos detenemos.
+          left_speed = 0.0;
+          right_speed = 0.0;
+      }
+      
+      // Aplicar la velocidad calculada a las cuatro ruedas
+      wb_motor_set_velocity(wheels[0], left_speed);
+      wb_motor_set_velocity(wheels[1], right_speed);
+      wb_motor_set_velocity(wheels[2], left_speed);
+      wb_motor_set_velocity(wheels[3], right_speed);
         
     
      
