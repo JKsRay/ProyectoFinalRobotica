@@ -1,343 +1,374 @@
-#include <webots/distance_sensor.h>
-#include <webots/lidar.h>
-#include <webots/gps.h>
 #include <webots/motor.h>
 #include <webots/robot.h>
-#include <math.h>
+#include <webots/lidar.h>
+#include <webots/gps.h>
+#include <webots/compass.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <webots/compass.h>
+#include <math.h>
+#include <stdbool.h>
 
-#define TIME_STEP 64
-#define GRID_SIZE 8  
-#define CELL_SIZE 0.5
-#define MAX_PATH_LEN 100
-#define MAX_OPEN_NODES 1000
-#define SPEED 4.0
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
+// --- PARÁMETROS DE CONFIGURACIÓN ---
+#define PASO_TIEMPO 64
+#define TAMAÑO_GRILLA 8
+#define TAMAÑO_CELDA 0.5
+#define LONGITUD_MAXIMA_RUTA 100
+#define MAXIMOS_NODOS_ABIERTOS 1000
+#define VELOCIDAD 4.0
+#define DISTANCIA_MINIMA_LIDAR 0.20  // Aumentado para mejor detección
+#define DISTANCIA_MAXIMA_AUTO_DETECCION 0.35  // Mayor margen de seguridad
+#define ESPACIO_LIBRE_PARED 0.25  // Distancia mínima segura a paredes
+#define TIEMPO_ESCAPE 15  // Tiempo mínimo de maniobra de escape
+
+// --- ESTRUCTURAS DE DATOS ---
 typedef struct {
   int x, y;
-} Point;
+} Punto;
 
 typedef struct {
   int x, y;
   int g, h, f;
-  int parent_index;
-} Node;
+  int indice_padre;
+} Nodo;
 
-
-int heuristic(int x1, int y1, int x2, int y2) {
+// --- ALGORITMO A* ---
+int heuristica(int x1, int y1, int x2, int y2) {
   return abs(x1 - x2) + abs(y1 - y2);
 }
 
-int plan_path(int grid[GRID_SIZE][GRID_SIZE], Point start, Point goal, Point path[], int max_path_len) {
-  Node open_list[MAX_OPEN_NODES];
-  int open_count = 0;
+int planificar_ruta(int grilla[TAMAÑO_GRILLA][TAMAÑO_GRILLA], Punto inicio, Punto objetivo, Punto ruta[], int longitud_maxima_ruta) {
+  Nodo lista_abierta[MAXIMOS_NODOS_ABIERTOS];
+  int cantidad_abiertos = 0;
+  Nodo lista_cerrada[TAMAÑO_GRILLA * TAMAÑO_GRILLA];
+  int cantidad_cerrados = 0;
 
-  Node closed_list[GRID_SIZE * GRID_SIZE];
-  int closed_count = 0;
+  Nodo nodo_inicio = {inicio.x, inicio.y, 0, heuristica(inicio.x, inicio.y, objetivo.x, objetivo.y), 0, -1};
+  nodo_inicio.f = nodo_inicio.g + nodo_inicio.h;
+  lista_abierta[cantidad_abiertos++] = nodo_inicio;
 
-  Node start_node = {start.x, start.y, 0, heuristic(start.x, start.y, goal.x, goal.y), 0, -1};
-  start_node.f = start_node.g + start_node.h;
-  open_list[open_count++] = start_node;
-
-  while (open_count > 0) {
-    int best_index = 0;
-    for (int i = 1; i < open_count; i++) {
-      if (open_list[i].f < open_list[best_index].f)
-        best_index = i;
+  while (cantidad_abiertos > 0) {
+    int mejor_indice = 0;
+    for (int i = 1; i < cantidad_abiertos; i++) {
+      if (lista_abierta[i].f < lista_abierta[mejor_indice].f) {
+        mejor_indice = i;
+      }
     }
 
-    Node current = open_list[best_index];
-    for (int i = best_index; i < open_count - 1; i++)
-      open_list[i] = open_list[i + 1];
-    open_count--;
-    closed_list[closed_count++] = current;
+    Nodo actual = lista_abierta[mejor_indice];
+    for (int i = mejor_indice; i < cantidad_abiertos - 1; i++) {
+      lista_abierta[i] = lista_abierta[i + 1];
+    }
+    cantidad_abiertos--;
+    lista_cerrada[cantidad_cerrados++] = actual;
 
-    if (current.x == goal.x && current.y == goal.y) {
-      int length = 0;
-      Node n = current;
-      while (n.parent_index != -1 && length < max_path_len) {
-        path[length++] = (Point){n.x, n.y};
-        n = closed_list[n.parent_index];
+    if (actual.x == objetivo.x && actual.y == objetivo.y) {
+      int longitud = 0;
+      Nodo n = actual;
+      while (n.indice_padre != -1 && longitud < longitud_maxima_ruta) {
+        ruta[longitud++] = (Punto){n.x, n.y};
+        n = lista_cerrada[n.indice_padre];
       }
-      path[length++] = (Point){start.x, start.y};
-      for (int i = 0; i < length / 2; i++) {
-        Point temp = path[i];
-        path[i] = path[length - i - 1];
-        path[length - i - 1] = temp;
+      ruta[longitud++] = (Punto){inicio.x, inicio.y};
+      for (int i = 0; i < longitud / 2; i++) {
+        Punto temporal = ruta[i];
+        ruta[i] = ruta[longitud - i - 1];
+        ruta[longitud - i - 1] = temporal;
       }
-      return length;
+      return longitud;
     }
 
-    const int dx[4] = {0, 1, 0, -1};
-    const int dy[4] = {1, 0, -1, 0};
+    const int desplazamiento_x[] = {0, 1, 0, -1};
+    const int desplazamiento_y[] = {1, 0, -1, 0};
     for (int d = 0; d < 4; d++) {
-      int nx = current.x + dx[d];
-      int ny = current.y + dy[d];
-      if (nx < 0 || ny < 0 || nx >= GRID_SIZE || ny >= GRID_SIZE)
+      int nuevo_x = actual.x + desplazamiento_x[d];
+      int nuevo_y = actual.y + desplazamiento_y[d];
+      if (nuevo_x < 0 || nuevo_y < 0 || nuevo_x >= TAMAÑO_GRILLA || nuevo_y >= TAMAÑO_GRILLA || grilla[nuevo_x][nuevo_y] == 1) {
         continue;
-      if (grid[nx][ny] == 1)
-        continue;
+      }
 
-      int in_closed = 0;
-      for (int i = 0; i < closed_count; i++) {
-        if (closed_list[i].x == nx && closed_list[i].y == ny) {
-          in_closed = 1;
+      bool en_cerrados = false;
+      for (int i = 0; i < cantidad_cerrados; i++) {
+        if (lista_cerrada[i].x == nuevo_x && lista_cerrada[i].y == nuevo_y) {
+          en_cerrados = true;
           break;
         }
       }
-      if (in_closed) continue;
+      if (en_cerrados) {
+        continue;
+      }
 
-      int g = current.g + 1;
-      int h = heuristic(nx, ny, goal.x, goal.y);
+      int g = actual.g + 1;
+      int h = heuristica(nuevo_x, nuevo_y, objetivo.x, objetivo.y);
       int f = g + h;
 
-      int in_open = -1;
-      for (int i = 0; i < open_count; i++) {
-        if (open_list[i].x == nx && open_list[i].y == ny) {
-          in_open = i;
+      int en_abiertos = -1;
+      for (int i = 0; i < cantidad_abiertos; i++) {
+        if (lista_abierta[i].x == nuevo_x && lista_abierta[i].y == nuevo_y) {
+          en_abiertos = i;
           break;
         }
       }
 
-      if (in_open != -1) {
-        if (f < open_list[in_open].f) {
-          open_list[in_open].g = g;
-          open_list[in_open].h = h;
-          open_list[in_open].f = f;
-          open_list[in_open].parent_index = closed_count - 1;
+      if (en_abiertos != -1) {
+        if (f < lista_abierta[en_abiertos].f) {
+          lista_abierta[en_abiertos].f = f;
+          lista_abierta[en_abiertos].g = g;
+          lista_abierta[en_abiertos].indice_padre = cantidad_cerrados - 1;
         }
-      } else if (open_count < MAX_OPEN_NODES) {
-        Node neighbor = {nx, ny, g, h, f, closed_count - 1};
-        open_list[open_count++] = neighbor;
+      } else if (cantidad_abiertos < MAXIMOS_NODOS_ABIERTOS) {
+        Nodo vecino = {nuevo_x, nuevo_y, g, h, f, cantidad_cerrados - 1};
+        lista_abierta[cantidad_abiertos++] = vecino;
       }
     }
   }
   return 0;
 }
 
-/*
- * This is the main program.
- * The arguments of the main function can be specified by the
- * "controllerArgs" field of the Robot node
-*/
- 
+// --- DETECCIÓN DE PROXIMIDAD PELIGROSA ---
+bool esta_muy_cerca_de_paredes(const float *rangos, int resolucion, double campo_vision) {
+  int cantidad_peligro = 0;
+  int total_validos = 0;
+  
+  for (int i = 0; i < resolucion; i++) {
+    double distancia = rangos[i];
+    if (!isinf(distancia) && !isnan(distancia) && distancia > DISTANCIA_MINIMA_LIDAR && distancia < 2.0) {
+      total_validos++;
+      if (distancia < ESPACIO_LIBRE_PARED) {
+        cantidad_peligro++;
+      }
+    }
+  }
+  
+  // Si más del 30% de las lecturas válidas están demasiado cerca
+  return (total_validos > 0) && ((double)cantidad_peligro / total_validos > 0.3);
+}
+
+// --- PROGRAMA PRINCIPAL ---
 int main() {
   wb_robot_init();
-  double left_speed = 1.0;
-  double right_speed = 1.0;
-  int i;
 
-  //motores
-  WbDeviceTag wheels[4];
-  char wheels_names[4][8] = {"wheel1", "wheel2", "wheel3", "wheel4"};
-  for (i = 0; i < 4; i++) {
-    wheels[i] = wb_robot_get_device(wheels_names[i]);
-    wb_motor_set_position(wheels[i], INFINITY);
+  // Inicialización de dispositivos
+  WbDeviceTag ruedas[4];
+  for (int i = 0; i < 4; i++) {
+    char nombre_rueda[8];
+    sprintf(nombre_rueda, "wheel%d", i + 1);
+    ruedas[i] = wb_robot_get_device(nombre_rueda);
+    wb_motor_set_position(ruedas[i], INFINITY);
   }
-  
-  //sensores 
-  WbDeviceTag ds[2];
-  char ds_names[2][10] = {"ds_left", "ds_right"};
-  for (i = 0; i < 2; i++) {
-    ds[i] = wb_robot_get_device(ds_names[i]);
-    wb_distance_sensor_enable(ds[i], TIME_STEP);
-  }
-  
-  //lidar
-  
-  WbDeviceTag lidar=wb_robot_get_device("lidar");
-  wb_lidar_enable(lidar,TIME_STEP);
-  wb_lidar_enable_point_cloud(lidar);
-  
-  //GPS
+
+  WbDeviceTag lidar = wb_robot_get_device("lidar");
+  wb_lidar_enable(lidar, PASO_TIEMPO);
   WbDeviceTag gps = wb_robot_get_device("gps");
-  wb_gps_enable(gps, TIME_STEP);
-  
-  // Compass
-  WbDeviceTag compass = wb_robot_get_device("compass");
-  wb_compass_enable(compass, TIME_STEP);
+  wb_gps_enable(gps, PASO_TIEMPO);
+  WbDeviceTag brujula = wb_robot_get_device("compass");
+  wb_compass_enable(brujula, PASO_TIEMPO);
 
-  //ruta grilla
-  int grid[GRID_SIZE][GRID_SIZE] = {0};
-  Point path[100];
-  int path_length = 0;
-  int replan_counter = 0;
-  
-  while (wb_robot_step(TIME_STEP) != -1) {
-   
-   //Flags
-   bool ds_detect_near=false;
-   bool lidar_detect_near=false;
-   
-   // Limpiamos el mapa en cada paso para basar las decisiones solo en la percepción actual.
-   // Esto evita la acumulación de errores y resuelve el problema de que el robot se detenga.
-   for (int x = 0; x < GRID_SIZE; x++) {
-        for (int y = 0; y < GRID_SIZE; y++) {
-            grid[x][y] = 0;
-        }
+  // Variables de estado y ruta
+  int grilla[TAMAÑO_GRILLA][TAMAÑO_GRILLA] = {0};
+  Punto ruta[LONGITUD_MAXIMA_RUTA];
+  int longitud_ruta = 0;
+  int contador_atascado = 0;
+  int temporizador_escape = 0;
+  bool objetivo_alcanzado = false;
+  bool en_modo_escape = false;
+  double x_anterior = 0.0, z_anterior = 0.0;
+  int contador_posicion_sin_cambios = 0;
+
+  printf("Controlador Anti-Oscilación v6.0 iniciado.\n");
+  wb_robot_step(PASO_TIEMPO);
+
+  // --- BUCLE PRINCIPAL DE CONTROL ---
+  while (wb_robot_step(PASO_TIEMPO) != -1) {
+    // 1. PERCEPCIÓN
+    const double *posicion = wb_gps_get_values(gps);
+    const double *valores_brujula = wb_compass_get_values(brujula);
+    double x_robot = posicion[0], z_robot = posicion[2];
+    double orientacion_robot = atan2(valores_brujula[2], valores_brujula[0]);
+
+    // 2. DETECCIÓN DE MOVIMIENTO ESTANCADO
+    double diferencia_posicion = sqrt(pow(x_robot - x_anterior, 2) + pow(z_robot - z_anterior, 2));
+    if (diferencia_posicion < 0.02) { // Si no se ha movido significativamente
+      contador_posicion_sin_cambios++;
+    } else {
+      contador_posicion_sin_cambios = 0;
+      x_anterior = x_robot;
+      z_anterior = z_robot;
     }
-   
-   left_speed = 1.0;
-   right_speed = 1.0;
-   
 
-   double ds_values[2];
-   for (i = 0; i < 2; i++){
-     ds_values[i] = wb_distance_sensor_get_value(ds[i]);
-     if (ds_values[i] < 950.0){
-       ds_detect_near=true;
-       printf("Sensor de distancia %d detectó un obstáculo\n", i);
-       break;
-     }
-   }
+    // 3. MAPEO CON FILTRO MEJORADO
+    for (int x = 0; x < TAMAÑO_GRILLA; x++) {
+      for (int y = 0; y < TAMAÑO_GRILLA; y++) {
+        grilla[x][y] = 0;
+      }
+    }
 
-        
-  
-    
-    //GPS
-    const double *pose = wb_gps_get_values(gps);
-    float robot_x = pose[0];
-    float robot_y = pose[2]; // Webots usa X-Z como plano horizontal
-   
-    
-    //lidar
-    // (1) Obtener datos del LIDAR y construir mapa de obstáculos
-    const float *ranges = wb_lidar_get_range_image(lidar);
-    int resolution = wb_lidar_get_horizontal_resolution(lidar);
-    double fov = wb_lidar_get_fov(lidar);
-    
-    for (int i = 0; i < resolution; i++) {
-      double angle = -fov / 2 + i * (fov / resolution);
-      double dist = ranges[i];
-      
-      //printf("Sensor lidar %d: %.2f\n", i, dist);
-      
-      if(isinf(dist)) continue; //ignorar infinito
+    const float *rangos = wb_lidar_get_range_image(lidar);
+    int resolucion = wb_lidar_get_horizontal_resolution(lidar);
+    double campo_vision = wb_lidar_get_fov(lidar);
 
-      if (dist < 1.0) {
-        float obs_x = robot_x + dist * cos(angle);
-        float obs_y = robot_y + dist * sin(angle);
+    // Mapeo con filtros mejorados
+    for (int i = 0; i < resolucion; i++) {
+      double distancia = rangos[i];
 
-        int cell_x = (int)((obs_x + GRID_SIZE * CELL_SIZE / 2) / CELL_SIZE);
-        int cell_y = (int)((obs_y + GRID_SIZE * CELL_SIZE / 2) / CELL_SIZE);
-
-        if (cell_x >= 0 && cell_x < GRID_SIZE && cell_y >= 0 && cell_y < GRID_SIZE)
-          grid[cell_x][cell_y] = 1;  // Marcado como ocupado
+      // FILTRO MEJORADO: Elimina lecturas inválidas Y autodetecciones
+      if (isinf(distancia) || isnan(distancia) || distancia < DISTANCIA_MINIMA_LIDAR) {
+        continue;
       }
       
-      if(dist < 0.15)
-        lidar_detect_near=true; //obstaculo muy cerca girar
-    
+      // Filtro adicional: ignorar lecturas demasiado cercanas (autodetección)
+      if (distancia < DISTANCIA_MAXIMA_AUTO_DETECCION) {
+        continue;
       }
-      
-      replan_counter++;
-      
-      // Condición para replanificar solo cada cierto número de pasos
-     if (replan_counter % 50 == 0) {
-  
-        // --- Planificación de Ruta ---  
-        // 1. Convertir la posición GPS del robot a coordenadas de la grilla
-        int start_cell_x = (int)((robot_x + GRID_SIZE * CELL_SIZE / 2) / CELL_SIZE);
-        int start_cell_y = (int)((robot_y + GRID_SIZE * CELL_SIZE / 2) / CELL_SIZE);
-        
-        Point start = {start_cell_x, start_cell_y};
-        Point goal = {GRID_SIZE - 2, GRID_SIZE - 2};
-        
-        //Forzamos que la celda de inicio y la de fin estén siempre libres
-        grid[start.x][start.y] = 0;
-        grid[goal.x][goal.y] = 0;
-        
-        // 2. Llamar a A* solo si estamos dentro de los límites del mapa
-        if (start_cell_x >= 0 && start_cell_x < GRID_SIZE && start_cell_y >= 0 && start_cell_y < GRID_SIZE) {
-            path_length = plan_path(grid, start, goal, path, 100);
-        } else {
-            path_length = 0; // No hay ruta si estamos fuera del mapa
+
+      double angulo_relativo = -campo_vision / 2.0 + (double)i * campo_vision / (resolucion - 1.0);
+      double angulo_global = orientacion_robot + angulo_relativo;
+
+      double x_obstaculo = x_robot + distancia * cos(angulo_global);
+      double z_obstaculo = z_robot + distancia * sin(angulo_global);
+
+      int celda_x = (int)((x_obstaculo + TAMAÑO_GRILLA * TAMAÑO_CELDA / 2.0) / TAMAÑO_CELDA);
+      int celda_y = (int)((z_obstaculo + TAMAÑO_GRILLA * TAMAÑO_CELDA / 2.0) / TAMAÑO_CELDA);
+
+      if (celda_x >= 0 && celda_x < TAMAÑO_GRILLA && celda_y >= 0 && celda_y < TAMAÑO_GRILLA) {
+        grilla[celda_x][celda_y] = 1;
+      }
+    }
+
+    // 4. DETECCIÓN DE PROXIMIDAD PELIGROSA
+    bool muy_cerca = esta_muy_cerca_de_paredes(rangos, resolucion, campo_vision);
+
+    // 5. LÓGICA DE ESCAPE MEJORADA
+    if (muy_cerca || contador_posicion_sin_cambios > 10) {
+      if (!en_modo_escape) {
+        en_modo_escape = true;
+        temporizador_escape = 0;
+        printf("¡ACTIVANDO MODO ESCAPE! Proximidad peligrosa detectada.\n");
+      }
+    }
+
+    if (en_modo_escape) {
+      temporizador_escape++;
+      if (temporizador_escape > TIEMPO_ESCAPE && !muy_cerca && contador_posicion_sin_cambios < 5) {
+        en_modo_escape = false;
+        contador_atascado = 0;
+        printf("Modo escape completado. Reanudando navegación normal.\n");
+      }
+    }
+
+    // 6. PLANIFICACIÓN
+    Punto inicio = {(int)((x_robot + TAMAÑO_GRILLA * TAMAÑO_CELDA / 2.0) / TAMAÑO_CELDA), 
+                    (int)((z_robot + TAMAÑO_GRILLA * TAMAÑO_CELDA / 2.0) / TAMAÑO_CELDA)};
+    Punto objetivo = {0, TAMAÑO_GRILLA - 1}; // Esquina superior izquierda exacta
+    
+    // VERIFICAR SI HEMOS LLEGADO AL OBJETIVO
+    double x_objetivo = (objetivo.x - TAMAÑO_GRILLA / 2.0) * TAMAÑO_CELDA + TAMAÑO_CELDA / 2.0;
+    double z_objetivo = (objetivo.y - TAMAÑO_GRILLA / 2.0) * TAMAÑO_CELDA + TAMAÑO_CELDA / 2.0;
+    double distancia_al_objetivo = sqrt(pow(x_robot - x_objetivo, 2) + pow(z_robot - z_objetivo, 2));
+    
+    if (distancia_al_objetivo < 0.3) {
+      objetivo_alcanzado = true;
+      printf("¡OBJETIVO ALCANZADO! Distancia: %.3f\n", distancia_al_objetivo);
+    }
+
+    // ZONA SEGURA: Asegurar que las celdas críticas estén libres
+    if (inicio.x >= 0 && inicio.x < TAMAÑO_GRILLA && inicio.y >= 0 && inicio.y < TAMAÑO_GRILLA) {
+      grilla[inicio.x][inicio.y] = 0;
+      // Liberar área más amplia alrededor del robot
+      for (int desplaz_x = -1; desplaz_x <= 1; desplaz_x++) {
+        for (int desplaz_y = -1; desplaz_y <= 1; desplaz_y++) {
+          int x_adyacente = inicio.x + desplaz_x;
+          int y_adyacente = inicio.y + desplaz_y;
+          if (x_adyacente >= 0 && x_adyacente < TAMAÑO_GRILLA && y_adyacente >= 0 && y_adyacente < TAMAÑO_GRILLA) {
+            grilla[x_adyacente][y_adyacente] = 0;
+          }
         }
-        
       }
-              
-     // --- LÓGICA DE CONTROL DE MOVIMIENTO ---
+    }
+    grilla[objetivo.x][objetivo.y] = 0;
 
-      if (lidar_detect_near || ds_detect_near) {
-          // MÁXIMA PRIORIDAD: Evasión reactiva de obstáculos
-          left_speed = -1.0;
-          right_speed = 1.0 ;
-      } else if (path_length > 1) {
-          // SEGUNDA PRIORIDAD: Seguir la ruta planificada
-      
-          // 1. Obtener el siguiente punto (waypoint) de la ruta.
-          // El path[0] es donde estamos, path[1] es el siguiente.
-          int lookahead_index = 3; // experimentar con este valor, 2, 3 o 4 son buenas opciones.
-          if (path_length <= lookahead_index) {
-              lookahead_index = path_length - 1; // Si la ruta es corta, apunta al final.
-          }
-          Point next_waypoint = path[lookahead_index];
-                
-          // Convertir las coordenadas de la grilla del waypoint a coordenadas del mundo
-          double waypoint_x = (next_waypoint.x - GRID_SIZE / 2.0) * CELL_SIZE;
-          double waypoint_y = (next_waypoint.y - GRID_SIZE / 2.0) * CELL_SIZE;
-      
-          // 2. Calcular el ángulo hacia el waypoint
-          double angle_to_goal = atan2(waypoint_y - robot_y, waypoint_x - robot_x);
-      
-          // 3. Obtener la orientación actual del robot desde la brújula
-          const double *compass_vals = wb_compass_get_values(compass);
-          // El norte en Webots está en el eje X, se utiliza atan2(norte, este)
-          double robot_bearing = atan2(compass_vals[2], compass_vals[0]);
-      
-          // 4. Calcular la diferencia de ángulo que necesitamos corregir
-          double angle_diff = angle_to_goal - robot_bearing;
-      
-          // Normalizar el ángulo a un rango de -PI a PI
-          while (angle_diff > M_PI) angle_diff -= 2 * M_PI;
-          while (angle_diff < -M_PI) angle_diff += 2 * M_PI;
-      
-          // 5. Decidir si girar o avanzar
-          double tolerance = 0.1; // 0.1 radianes (aprox 5.7 grados)
-          if (fabs(angle_diff) > tolerance) {
-            // Si no estamos orientados, GIRAR.
-            left_speed = angle_diff * 4.0; // Aumentamos un poco la reactividad del giro
-            right_speed = -angle_diff * 4.0;
-        
-            // Limitar la velocidad para que no exceda la velocidad máxima.
-            if (left_speed > SPEED) left_speed = SPEED;
-            if (left_speed < -SPEED) left_speed = -SPEED;
-            if (right_speed > SPEED) right_speed = SPEED;
-            if (right_speed < -SPEED) right_speed = -SPEED;
+    longitud_ruta = planificar_ruta(grilla, inicio, objetivo, ruta, LONGITUD_MAXIMA_RUTA);
 
-          } else {
-              // Si ya estamos orientados, AVANZAR.
-              left_speed = SPEED;
-              right_speed = SPEED;
-          }
-                
+    // 7. ACCIÓN CON CONTROL ANTI-OSCILACIÓN
+    double velocidad_izquierda = 0.0, velocidad_derecha = 0.0;
+    
+    if (objetivo_alcanzado) {
+      // ¡Hemos llegado! Detener el robot
+      velocidad_izquierda = 0.0;
+      velocidad_derecha = 0.0;
+      printf("Misión completada. Robot detenido en el objetivo.\n");
+    } else if (en_modo_escape) {
+      // MANIOBRA DE ESCAPE MEJORADA
+      if (temporizador_escape < 8) {
+        // Retroceso más prolongado y decidido
+        velocidad_izquierda = -VELOCIDAD * 0.7;
+        velocidad_derecha = -VELOCIDAD * 0.7;
+        printf("Escape: Retrocediendo... (%d/%d)\n", temporizador_escape, TIEMPO_ESCAPE);
       } else {
-          // TERCERA PRIORIDAD: No hay obstáculos y no hay ruta, nos detenemos.
-          left_speed = 0.0;
-          right_speed = 0.0;
+        // Giro más amplio para evitar la esquina problemática
+        velocidad_izquierda = VELOCIDAD * 0.8;
+        velocidad_derecha = -VELOCIDAD * 0.8;
+        printf("Escape: Girando para evitar obstáculo... (%d/%d)\n", temporizador_escape, TIEMPO_ESCAPE);
       }
+    } else if (longitud_ruta > 1) {
+      contador_atascado = 0;
+      printf("Navegación normal. Ruta: %d pasos. Pos: (%d,%d) -> Meta: (%d,%d)\n", 
+             longitud_ruta, inicio.x, inicio.y, objetivo.x, objetivo.y);
+
+      // Lookahead más conservador cerca del objetivo
+      int indice_punto_futuro = (distancia_al_objetivo < 1.0) ? 1 : ((longitud_ruta > 2) ? 2 : 1);
+      Punto punto_navegacion = ruta[indice_punto_futuro];
+
+      double x_punto_navegacion = (punto_navegacion.x - TAMAÑO_GRILLA / 2.0) * TAMAÑO_CELDA + TAMAÑO_CELDA / 2.0;
+      double z_punto_navegacion = (punto_navegacion.y - TAMAÑO_GRILLA / 2.0) * TAMAÑO_CELDA + TAMAÑO_CELDA / 2.0;
+
+      double angulo_al_punto_navegacion = atan2(z_punto_navegacion - z_robot, x_punto_navegacion - x_robot);
+      double diferencia_angulo = angulo_al_punto_navegacion - orientacion_robot;
+
+      while (diferencia_angulo > M_PI) diferencia_angulo -= 2 * M_PI;
+      while (diferencia_angulo < -M_PI) diferencia_angulo += 2 * M_PI;
+
+      if (fabs(diferencia_angulo) > 0.08) {
+        // Giro más suave y controlado
+        double factor_giro = (distancia_al_objetivo < 1.0) ? 3.0 : 4.0;
+        velocidad_izquierda = diferencia_angulo * factor_giro;
+        velocidad_derecha = -diferencia_angulo * factor_giro;
+      } else {
+        // Avance adaptativo según la proximidad al objetivo
+        double factor_velocidad = (distancia_al_objetivo < 1.0) ? 0.4 : 0.6;
+        velocidad_izquierda = VELOCIDAD * factor_velocidad;
+        velocidad_derecha = VELOCIDAD * factor_velocidad;
+      }
+    } else {
+      contador_atascado++;
+      printf("¡RUTA BLOQUEADA! Activando protocolo de emergencia... (%d)\n", contador_atascado);
       
-      // Aplicar la velocidad calculada a las cuatro ruedas
-      wb_motor_set_velocity(wheels[0], left_speed);
-      wb_motor_set_velocity(wheels[1], right_speed);
-      wb_motor_set_velocity(wheels[2], left_speed);
-      wb_motor_set_velocity(wheels[3], right_speed);
-        
-    
-     
-   
+      // Protocolo de emergencia simplificado
+      if (contador_atascado % 20 < 10) {
+        velocidad_izquierda = -VELOCIDAD * 0.6;
+        velocidad_derecha = -VELOCIDAD * 0.6;
+      } else {
+        velocidad_izquierda = VELOCIDAD * 0.7;
+        velocidad_derecha = -VELOCIDAD * 0.7;
+      }
+    }
 
-     // (3) Navegación hacia el siguiente punto (simplificada)
-     
-    
-    fflush(stdout); 
-    
-  };
+    // Limitación de velocidad
+    velocidad_izquierda = fmax(-VELOCIDAD, fmin(VELOCIDAD, velocidad_izquierda));
+    velocidad_derecha = fmax(-VELOCIDAD, fmin(VELOCIDAD, velocidad_derecha));
 
-  
+    // Asignar velocidad a las ruedas
+    wb_motor_set_velocity(ruedas[0], velocidad_izquierda);
+    wb_motor_set_velocity(ruedas[1], velocidad_derecha);
+    wb_motor_set_velocity(ruedas[2], velocidad_izquierda);
+    wb_motor_set_velocity(ruedas[3], velocidad_derecha);
+
+    fflush(stdout);
+  }
+
   wb_robot_cleanup();
-
   return 0;
 }
